@@ -35,6 +35,110 @@ SCODES = {'400': 'REQUEST_REJECTED',
 DCODES = ['RESERVED', 'US', 'GB', 'DE', 'FR', 'JP', 'CA', 'CN', 'IT', 'ES',
           'IN', 'MX']
 
+# csv indices. used when parsing csv and stats fields.
+# https://github.com/keepacom/api_backend
+    # see api_backend/src/main/java/com/keepa/api/backend/structs/Product.java
+    # [index in csv, key name, isfloat(is price or rating)]
+csv_indices = [[0, 'AMAZON', True],
+               [1, 'NEW', True],
+               [2, 'USED', True],
+               [3, 'SALES', False],
+               [4, 'LISTPRICE', True],
+               [5, 'COLLECTIBLE', True],
+               [6, 'REFURBISHED', True],
+               [7, 'NEW_FBM_SHIPPING', True],
+               [8, 'LIGHTNING_DEAL', True],
+               [9, 'WAREHOUSE', True],
+               [10, 'NEW_FBA', True],
+               [11, 'COUNT_NEW', False],
+               [12, 'COUNT_USED', False],
+               [13, 'COUNT_REFURBISHED', False],
+               [14, 'CollectableOffers', False],
+               [15, 'EXTRA_INFO_UPDATES', False],
+               [16, 'RATING', True],
+               [17, 'COUNT_REVIEWS', False],
+               [18, 'BUY_BOX_SHIPPING', True],
+               [19, 'USED_NEW_SHIPPING', True],
+               [20, 'USED_VERY_GOOD_SHIPPING', True],
+               [21, 'USED_GOOD_SHIPPING', True],
+               [22, 'USED_ACCEPTABLE_SHIPPING', True],
+               [23, 'COLLECTIBLE_NEW_SHIPPING', True],
+               [24, 'COLLECTIBLE_VERY_GOOD_SHIPPING', True],
+               [25, 'COLLECTIBLE_GOOD_SHIPPING', True],
+               [26, 'COLLECTIBLE_ACCEPTABLE_SHIPPING', True],
+               [27, 'REFURBISHED_SHIPPING', True],
+               [28, 'EBAY_NEW_SHIPPING', True],
+               [29, 'EBAY_USED_SHIPPING', True],
+               [30, 'TRADE_IN', True],
+               [31, 'RENT', False]]
+
+
+def _parse_stats(stats, to_datetime):
+    stats_parsed = {}
+
+    for stat_key, stat_value in stats.items():
+        if isinstance(stat_value, int) and stat_value < 0:  # -1 or -2 means not exist. 0 doesn't mean not exist.
+            stat_value = None
+
+        if stat_value is not None:
+            if stat_key == 'lastOffersUpdate':
+                stats_parsed[stat_key] = keepa_minutes_to_time([stat_value], to_datetime)[0]
+            elif isinstance(stat_value, list) and len(stat_value) > 0:
+                stat_value_dict = {}
+                convert_time_in_value_pair = any(map(lambda v: v is not None and isinstance(v, list), stat_value))
+
+                for ind, key, isfloat in csv_indices:
+                    stat_value_item = stat_value[ind] if ind < len(stat_value) else None
+
+                    def normalize_value(v):
+                        if v < 0:
+                            return None
+
+                        if isfloat:
+                            v = float(v) / 100
+                            if key == 'RATING':
+                                v = v * 10
+
+                        return v
+
+                    if stat_value_item is not None:
+                        if convert_time_in_value_pair:
+                            stat_value_time, stat_value_item = stat_value_item
+                            stat_value_item = normalize_value(stat_value_item)
+                            if stat_value_item is not None:
+                                stat_value_time = keepa_minutes_to_time([stat_value_time], to_datetime)[0]
+                                stat_value_item = (stat_value_time, stat_value_item)
+                        else:
+                            stat_value_item = normalize_value(stat_value_item)
+
+                    if stat_value_item is not None:
+                        stat_value_dict[key] = stat_value_item
+
+                if len(stat_value_dict) > 0:
+                    stats_parsed[stat_key] = stat_value_dict
+            else:
+                stats_parsed[stat_key] = stat_value
+
+    return stats_parsed
+
+
+_seller_time_data_keys = ['trackedSince', 'lastUpdate']
+
+def _parse_seller(seller_raw_response, to_datetime):
+    sellers = list(seller_raw_response.values())
+    for seller in sellers:
+
+        def convert_time_data(key):
+            date_val = seller.get(key, None)
+            if date_val is not None:
+                return (key, keepa_minutes_to_time([date_val], to_datetime)[0])
+            else:
+                return None
+
+        seller.update(filter(lambda p: p is not None, map(convert_time_data, _seller_time_data_keys)))
+
+    return dict(map(lambda seller: (seller['sellerId'], seller), sellers))
+
 
 def parse_csv(csv, to_datetime=True, out_of_stock_as_nan=True):
     """Parses csv list from keepa into a python dictionary.
@@ -150,45 +254,9 @@ def parse_csv(csv, to_datetime=True, out_of_stock_as_nan=True):
     Negative prices
 
     """
-    # https://github.com/keepacom/api_backend
-    # see api_backend/src/main/java/com/keepa/api/backend/structs/Product.java
-    # [index in csv, key name, isfloat (is price)]
-    indices = [[0, 'AMAZON', True],
-               [1, 'NEW', True],
-               [2, 'USED', True],
-               [3, 'SALES', False],
-               [4, 'LISTPRICE', True],
-               [5, 'COLLECTIBLE', True],
-               [6, 'REFURBISHED', True],
-               [7, 'NEW_FBM_SHIPPING', True],
-               [8, 'LIGHTNING_DEAL', True],
-               [9, 'WAREHOUSE', True],
-               [10, 'NEW_FBA', True],
-               [11, 'COUNT_NEW', False],
-               [12, 'COUNT_USED', False],
-               [13, 'COUNT_REFURBISHED', False],
-               [14, 'CollectableOffers', False],
-               [15, 'EXTRA_INFO_UPDATES', False],
-               [16, 'RATING', True],
-               [17, 'COUNT_REVIEWS', False],
-               [18, 'BUY_BOX_SHIPPING', True],
-               [19, 'USED_NEW_SHIPPING', True],
-               [20, 'USED_VERY_GOOD_SHIPPING', True],
-               [21, 'USED_GOOD_SHIPPING', True],
-               [22, 'USED_ACCEPTABLE_SHIPPING', True],
-               [23, 'COLLECTIBLE_NEW_SHIPPING', True],
-               [24, 'COLLECTIBLE_VERY_GOOD_SHIPPING', True],
-               [25, 'COLLECTIBLE_GOOD_SHIPPING', True],
-               [26, 'COLLECTIBLE_ACCEPTABLE_SHIPPING', True],
-               [27, 'REFURBISHED_SHIPPING', True],
-               [28, 'EBAY_NEW_SHIPPING', True],
-               [29, 'EBAY_USED_SHIPPING', True],
-               [30, 'TRADE_IN', True],
-               [31, 'RENT', False]]
-
     product_data = {}
 
-    for ind, key, isfloat in indices:
+    for ind, key, isfloat in csv_indices:
         if csv[ind]:  # Check if entry it exists
             if 'SHIPPING' in key:  # shipping price is included
                 # Data goes [time0, value0, shipping0, time1, value1,
@@ -208,16 +276,16 @@ def parse_csv(csv, to_datetime=True, out_of_stock_as_nan=True):
                 if out_of_stock_as_nan:
                     values[nan_mask] = np.nan
 
-            if key == 'RATING':
-                values /= 10
+                if key == 'RATING':
+                    values *= 10
 
             timeval = keepa_minutes_to_time(times, to_datetime)
 
             product_data['%s_time' % key] = timeval
             product_data[key] = values
 
-            # combine time and value into a data frame
-            product_data['df_%s' % key] = pd.DataFrame({'time': timeval, 'value': values})
+            # combine time and value into a data frame using time as index
+            product_data['df_%s' % key] = pd.DataFrame({'value': values}, index=timeval)
 
     return product_data
 
@@ -319,7 +387,8 @@ class AsyncKeepa():
     async def query(self, items, stats=None, domain='US', history=True,
                     offers=None, update=None, to_datetime=True,
                     rating=False, out_of_stock_as_nan=True, stock=False,
-                    product_code_is_asin=True, progress_bar=True, buybox=False):
+                    product_code_is_asin=True, progress_bar=True, buybox=False,
+                    wait=True):
         """ Performs a product query of a list, array, or single ASIN.
         Returns a list of product data with one entry for each
         product.
@@ -412,6 +481,9 @@ class AsyncKeepa():
             offers parameter also provides access to all buy box
             related data. To access the statistics object the stats
             parameter is required.
+
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
 
         Returns
         -------
@@ -599,7 +671,8 @@ class AsyncKeepa():
                 history=history, rating=rating,
                 to_datetime=to_datetime,
                 out_of_stock_as_nan=out_of_stock_as_nan,
-                buybox=buybox)
+                buybox=buybox,
+                wait=wait)
             idx += nrequest
             products.extend(response['products'])
 
@@ -698,16 +771,25 @@ class AsyncKeepa():
         to_datetime = kwargs.pop('to_datetime', True)
 
         # Query and replace csv with parsed data if history enabled
-        response = await self._request('product', kwargs)
+        wait = kwargs.get("wait")
+        kwargs.pop("wait", None)
+        response = await self._request('product', kwargs, wait=wait)
         if kwargs['history']:
             for product in response['products']:
                 if product['csv']:  # if data exists
                     product['data'] = parse_csv(product['csv'],
                                                 to_datetime,
                                                 out_of_stock_as_nan)
+
+        if kwargs.get('stats', None):
+            for product in response['products']:
+                stats = product.get('stats', None)
+                if stats:
+                    product['stats_parsed'] = _parse_stats(stats, to_datetime)
+
         return response
 
-    async def best_sellers_query(self, category, rank_avg_range=0, domain='US'):
+    async def best_sellers_query(self, category, rank_avg_range=0, domain='US', wait=True):
         """
         Retrieve an ASIN list of the most popular products based on
         sales in a specific category or product group.  See
@@ -746,6 +828,9 @@ class AsyncKeepa():
             RESERVED, US, GB, DE, FR, JP, CA, CN, IT, ES, IN, MX
             Default US
 
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
+
         Returns
         -------
         best_sellers : list
@@ -758,13 +843,13 @@ class AsyncKeepa():
                    'category': category,
                    'range': rank_avg_range}
 
-        response = await self._request('bestsellers', payload)
+        response = await self._request('bestsellers', payload, wait=wait)
         if 'bestSellersList' in response:
             return response['bestSellersList']['asinList']
         else:  # pragma: no cover
             log.info('Best sellers search results not yet available')
 
-    async def search_for_categories(self, searchterm, domain='US'):
+    async def search_for_categories(self, searchterm, domain='US', wait=True):
         """
         Searches for categories from Amazon.
 
@@ -772,6 +857,9 @@ class AsyncKeepa():
         ----------
         searchterm : str
             Input search term.
+
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
 
         Returns
         -------
@@ -795,14 +883,14 @@ class AsyncKeepa():
                    'type': 'category',
                    'term': searchterm}
 
-        response = await self._request('search', payload)
+        response = await self._request('search', payload, wait=wait)
         if response['categories'] == {}:  # pragma no cover
             raise Exception('Categories search results not yet available ' +
                             'or no search terms found.')
         else:
             return response['categories']
 
-    async def category_lookup(self, category_id, domain='US', include_parents=0):
+    async def category_lookup(self, category_id, domain='US', include_parents=0, wait=True):
         """
         Return root categories given a categoryId.
 
@@ -819,6 +907,9 @@ class AsyncKeepa():
 
         include_parents : int
             Include parents.
+
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
 
         Returns
         -------
@@ -841,14 +932,15 @@ class AsyncKeepa():
                    'category': category_id,
                    'parents': include_parents}
 
-        response = await self._request('category', payload)
+        response = await self._request('category', payload, wait=wait)
         if response['categories'] == {}:  # pragma no cover
             raise Exception('Category lookup results not yet available or no' +
                             'match found.')
         else:
             return response['categories']
 
-    async def seller_query(self, seller_id, domain='US', storefront=False, update=None):
+    async def seller_query(self, seller_id, domain='US', to_datetime=True, 
+                           storefront=False, update=None, wait=True):
         """Receives seller information for a given seller id.  If a
         seller is not found no tokens will be consumed.
 
@@ -899,6 +991,9 @@ class AsyncKeepa():
               totalStorefrontAsinsCSV field of the seller object will be
               updated.
 
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
+
         Returns
         -------
         seller_info : dict
@@ -923,15 +1018,16 @@ class AsyncKeepa():
         payload = {'key': self.accesskey,
                    'domain': DCODES.index(domain),
                    'seller': seller}
+
         if storefront:
             payload["storefront"] = int(storefront)
         if update:
             payload["update"] = update
 
-        response = await self._request('seller', payload)
-        return response['sellers']
+        response = await self._request('seller', payload, wait=wait)
+        return _parse_seller(response['sellers'], to_datetime)
 
-    async def product_finder(self, product_parms, domain='US'):
+    async def product_finder(self, product_parms, domain='US', wait=True):
         """Query the keepa product database to find products matching
         your criteria. Almost all product fields can be searched for
         and sorted by.
@@ -1924,6 +2020,12 @@ class AsyncKeepa():
             - ``'sellerIdsLowestFBA': str``
             - ``'sellerIdsLowestFBM': str``
             - ``'size': str``
+            - ``'salesRankDrops180_lte': int``
+            - ``'salesRankDrops180_gte': int``
+            - ``'salesRankDrops90_lte': int``
+            - ``'salesRankDrops90_gte': int``
+            - ``'salesRankDrops30_lte': int``
+            - ``'salesRankDrops30_gte': int``
             - ``'stockAmazon_lte': int``
             - ``'stockAmazon_gte': int``
             - ``'stockBuyBox_lte': int``
@@ -1943,6 +2045,9 @@ class AsyncKeepa():
         domain : str, optional
             One of the following Amazon domains: RESERVED, US, GB, DE,
             FR, JP, CA, CN, IT, ES, IN, MX Defaults to US.
+
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
 
         Examples
         --------
@@ -1966,10 +2071,10 @@ class AsyncKeepa():
                    'domain': DCODES.index(domain),
                    'selection': json.dumps(product_parms)}
 
-        response = await self._request('query', payload)
+        response = await self._request('query', payload, wait=wait)
         return response['asinList']
 
-    async def deals(self, deal_parms, domain='US'):
+    async def deals(self, deal_parms, domain='US', wait=True):
         """Query the Keepa API for product deals.
 
         You can find products that recently changed and match your
@@ -2012,6 +2117,9 @@ class AsyncKeepa():
             One of the following Amazon domains: RESERVED, US, GB, DE,
             FR, JP, CA, CN, IT, ES, IN, MX Defaults to US.
 
+        wait : bool, optional
+            Wait available token before doing effective query, Defaults to ``True``.
+
         Examples
         --------
         >>> import keepa
@@ -2038,7 +2146,7 @@ class AsyncKeepa():
                    'domain': DCODES.index(domain),
                    'selection': json.dumps(deal_parms)}
 
-        response = await self._request('query', payload)
+        response = await self._request('query', payload, wait=wait)
         return response['asinList']
 
     async def _request(self, request_type, payload, wait=True):
@@ -2046,8 +2154,6 @@ class AsyncKeepa():
         into a json format.  Handles errors and waits for avaialbe
         tokens if allowed.
         """
-        if wait:
-            await self.wait_for_tokens()
 
         while True:
             async with aiohttp.ClientSession() as session:
